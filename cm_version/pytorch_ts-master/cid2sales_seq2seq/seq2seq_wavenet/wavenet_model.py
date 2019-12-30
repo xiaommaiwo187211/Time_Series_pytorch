@@ -11,7 +11,7 @@ class DenseConv(nn.Conv1d):
 										kernel_size=1)
 
 	def forward(self, inputs):
-		return F.relu(super(DenseConv, self).forward(inputs))
+		return super(DenseConv, self).forward(inputs)
 
 
 class CausalDilatedConv(nn.Conv1d):
@@ -34,6 +34,9 @@ class TemporalConv(nn.Module):
 							       		   kernel_size=kernel_size, dilation=dilation)
 		self.conv_dense_post = DenseConv(intermediate_channel_size, output_channel_size)
 
+		self.relu = nn.ReLU()
+		self.tanh = nn.Tanh()
+
 	def forward(self, inputs):
 		# inputs: (batch, feature, total_sequence)
 
@@ -42,7 +45,7 @@ class TemporalConv(nn.Module):
 		# outputs_filter: (batch, intermediate_channel, total_sequence)
 		outputs_filter = self.conv_filter(outputs)
 		outputs_gate = self.conv_gate(outputs)
-		outputs_post = F.tanh(outputs_filter) * F.relu(outputs_gate)
+		outputs_post = self.tanh(outputs_filter) * self.relu(outputs_gate)
 		outputs_post = self.conv_dense_post(outputs_post)
 		outputs = outputs + outputs_post
 		return outputs, outputs_post
@@ -64,9 +67,11 @@ class WaveNet(nn.Module):
 			self.tcn_list.append(tcn_d)
 
 		self.conv_dense1 = DenseConv(output_channel_size, post_channel_size)
+		self.relu = nn.ReLU()
 		self.dropout = nn.Dropout(dropout)
 		self.conv_dense2 = DenseConv(post_channel_size, 1)
 		self.conv_post = nn.Sequential(self.conv_dense1,
+									   self.relu,
 									   self.dropout,
 									   self.conv_dense2)
 

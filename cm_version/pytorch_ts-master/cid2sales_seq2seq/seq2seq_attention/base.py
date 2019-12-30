@@ -4,6 +4,7 @@ from scipy.stats import zscore
 from tqdm import trange
 
 
+
 # Feature flow for all skus
 class Feature_Flow:
 
@@ -90,7 +91,7 @@ class Feature_Flow:
         date_df = self.create_holiday_features(date_df)
         df_train_sales = self.create_sales_median()
         df_total = self.df_total.merge(date_df, on='date') \
-            .merge(df_train_sales, on='item_sku_id')
+                                .merge(df_train_sales, on='item_sku_id')
         return df_total.sort_values(['item_sku_id', 'date']).reset_index(drop=True)
 
 
@@ -201,17 +202,9 @@ class Feature_Flow_SKU:
 
     def create_ts_samples(self, X, y, feature_cols, encoder_seq_len, decoder_seq_len, skip_period, mode='train'):
 
-        def mask_zero(arr, mode):
-            length = decoder_seq_len - arr.shape[1]
-            if mode == 'train' or len(arr) == 0 or length == 0:
-                return arr, 0
-            mask = np.zeros((arr.shape[0], length, arr.shape[2]))
-            arr_ = np.concatenate([arr, mask], axis=1)
-            return arr_, length
-
         # number of start points considering skip period
         if mode == 'train':
-            # series [1, 0, 3, 2, 4, 7, 2, 4, 3, 5, 6, 8, 4] with encoder_seq_len=3 and output_seq_len=2 and skip_period=4
+            # series [1, 0, 3, 2, 4, 7, 2, 4, 3, 5, 6, 8, 4] with encoder_seq_len=3 and decoder_seq_len=2 and skip_period=4
             # will have 3 start points [1, 0, 3, 2, 4], [4, 7, 2, 4, 3], [3, 5, 6, 8, 4]
             start_points = list(
                 range((len(X) - encoder_seq_len - decoder_seq_len + skip_period) // skip_period))
@@ -219,8 +212,8 @@ class Feature_Flow_SKU:
             # test set only has one sequence for each sku
             start_points = [0]
         encoder_points = [list(range(start_point * skip_period,
-                                     start_point * skip_period + encoder_seq_len))
-                          for start_point in start_points]
+                                    start_point * skip_period + encoder_seq_len))
+                         for start_point in start_points]
         decoder_points = [list(range(start_point * skip_period + encoder_seq_len,
                                      min(start_point * skip_period + encoder_seq_len + decoder_seq_len,
                                          len(X))))
@@ -235,10 +228,10 @@ class Feature_Flow_SKU:
         # targets_total: (sample, sequence)
         encoder_total = np.take(X, encoder_points, axis=0)
         # TODO: for test set, mask decoder sequence and target sequence
-        decoder_total, mask_len = mask_zero(np.take(X_, decoder_points, axis=0), mode)
-        targets_total, mask_len = mask_zero(np.take(y, decoder_points, axis=0), mode)
+        decoder_total = np.take(X_, decoder_points, axis=0)
+        targets_total = np.take(y, decoder_points, axis=0)
         start_points = [start_point * skip_period for start_point in start_points]
-        return encoder_total, decoder_total, targets_total, start_points, mask_len
+        return encoder_total, decoder_total, targets_total, start_points
 
 
 def main(data_dir, seed):
@@ -253,22 +246,22 @@ def main(data_dir, seed):
     def main_sub(features_df_sub, mode):
         # SKU date range must be larger than (ENCODER_SEQ_LEN - PADDING_SIZE)
         if features_df_sub.shape[0] <= ENCODER_SEQ_LEN - PADDING_SIZE:
-            return [], [], [], [], None, None, 0
+            return [], [], [], [], None, None
         feature_flow_sku = Feature_Flow_SKU(features_df_sub, date_df, TIME_FRAME, PADDING_SIZE, LAG_PERIODS, global_redprice_std,
                                             NORMALIZE, LOG_TRANSFORM)
         Xtrain, ytrain, Xtest, ytest, feature_cols, mean_, std_ = feature_flow_sku.create_train_test()
         X, y = eval('X' + mode), eval('y' + mode)
-        encoder_total, decoder_total, targets_total, start_points, mask_len = \
+        encoder_total, decoder_total, targets_total, start_points = \
             feature_flow_sku.create_ts_samples(X, y, feature_cols, ENCODER_SEQ_LEN, DECODER_SEQ_LEN, SKIP_PERIOD, mode)
-        return encoder_total, decoder_total, targets_total, start_points, mean_, std_, mask_len
+        return encoder_total, decoder_total, targets_total, start_points, mean_, std_
 
     for mode in ['train', 'test']:
-        encoder_arr, decoder_arr, targets_arr, start_points_arr, mean_std_arr, sku_brand_cid3_arr, mask_len_arr = [], [], [], [], [], [], []
+        encoder_arr, decoder_arr, targets_arr, start_points_arr, mean_std_arr, sku_brand_cid3_arr = [], [], [], [], [], []
         for i in trange(len(item_sku_id_list)):
             item_sku_id = item_sku_id_list[i]
             features_df_sub = features_df[features_df.item_sku_id == item_sku_id]
             brand_code, cid3 = features_df_sub.brand_code.min(), features_df_sub.cid3.min()
-            encoder_total, decoder_total, targets_total, start_points, mean_, std_, mask_len = main_sub(features_df_sub, mode)
+            encoder_total, decoder_total, targets_total, start_points, mean_, std_ = main_sub(features_df_sub, mode)
             if len(start_points) == 0:
                 continue
             # TODO: for test set, mask decoder sequence and target sequence
@@ -280,12 +273,10 @@ def main(data_dir, seed):
             start_points_arr.append(start_points)
             mean_std_arr.append(np.array([mean_, std_] * len(start_points)).reshape((-1, 2)))
             sku_brand_cid3_arr.append(np.array([item_sku_id, brand_code, cid3] * len(start_points)).reshape((-1, 3)))
-            mask_len_arr.append(np.array([mask_len] * len(start_points)).reshape((-1, 1)))
 
         encoder_arr, decoder_arr = np.concatenate(encoder_arr), np.concatenate(decoder_arr)
         targets_arr, start_points_arr = np.concatenate(targets_arr), np.concatenate(start_points_arr)
         mean_std_arr, sku_brand_cid3_arr = np.concatenate(mean_std_arr), np.concatenate(sku_brand_cid3_arr)
-        mask_len_arr = np.concatenate(mask_len_arr)
 
         np.save(DATA_DIR + mode + '_encoder_inputs.npy', encoder_arr)
         np.save(DATA_DIR + mode + '_decoder_inputs.npy', decoder_arr)
@@ -293,11 +284,11 @@ def main(data_dir, seed):
         np.save(DATA_DIR + mode + '_start_points.npy', start_points_arr)
         np.save(DATA_DIR + mode + '_mean_std.npy', mean_std_arr)
         np.save(DATA_DIR + mode + '_sku_brand_cid3.npy', sku_brand_cid3_arr)
-        np.save(DATA_DIR + mode + '_mask_len.npy', mask_len_arr)
 
         # # in order for sku embedding, test data must not contain sku which isn't in train data
         # if mode == 'train':
         #     item_sku_id_list = list(set(sku_arr[:, 0]))
+
 
 
 

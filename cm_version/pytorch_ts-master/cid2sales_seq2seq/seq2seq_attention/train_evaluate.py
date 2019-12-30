@@ -4,8 +4,8 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, RandomSampler
 
-from seq2seq_naive.dataloader import WeightedSampler, TimeSeriesDataSet
-from seq2seq_naive.seq2seq_model import *
+from seq2seq_attention.dataloader import WeightedSampler, TimeSeriesDataSet
+from seq2seq_attention.seq2seq_model import *
 
 import numpy as np
 from time import time
@@ -17,7 +17,7 @@ def train_epoch(model, data_loader, optimizer, loss_func, teacher_forcing_ratio,
     model.train()
 
     epoch_loss, total_num = 0, 0
-    for i, (_, encoder_inputs, decoder_inputs, decoder_targets, sku_start_points, mean_std, sku_brand_cid3, _) in enumerate(data_loader):
+    for i, (_, encoder_inputs, decoder_inputs, decoder_targets, sku_start_points, mean_std, sku_brand_cid3) in enumerate(data_loader):
         # encoder_inputs: (encoder_sequence, batch, feature)
         # decoder_inputs: (decoder_sequence, batch, feature)
         # decoder_targets: (decoder_sequence, batch, 1)
@@ -31,11 +31,8 @@ def train_epoch(model, data_loader, optimizer, loss_func, teacher_forcing_ratio,
         mean_std = mean_std.float().to(device)
         cid3 = sku_brand_cid3[:, -1].long().to(device)
 
-        decoder_seq_len, batch_size, _ = decoder_targets.size()
-        mask = torch.ones(batch_size, decoder_seq_len, device=device)
-
         model_outputs = model(cid3, encoder_inputs, decoder_inputs, mean_std, teacher_forcing_ratio=teacher_forcing_ratio)
-        loss, cnt = loss_func(model_outputs.contiguous().view(-1), decoder_targets.contiguous().view(-1), mask.view(-1))
+        loss, cnt = loss_func(model_outputs.contiguous().view(-1), decoder_targets.contiguous().view(-1))
         loss.backward()
         clip_grad_norm_(model.parameters(), clip)
         optimizer.step()
@@ -50,37 +47,23 @@ def evaluate_epoch(model, data_loader, loss_func, device):
 
     epoch_loss, total_num = 0, 0
     with torch.no_grad():
-        for i, (_, encoder_inputs, decoder_inputs, decoder_targets, sku_start_points, mean_std, sku_brand_cid3, mask_len) in enumerate(data_loader):
+        for i, (_, encoder_inputs, decoder_inputs, decoder_targets, sku_start_points, mean_std, sku_brand_cid3) in enumerate(data_loader):
             encoder_inputs = encoder_inputs.float().to(device).permute(1, 0, 2)
             decoder_inputs = decoder_inputs.float().to(device).permute(1, 0, 2)
             decoder_targets = decoder_targets.float().to(device).permute(1, 0, 2)
             mean_std = mean_std.float().to(device)
             cid3 = sku_brand_cid3[:, -1].long().to(device)
 
-            decoder_seq_len, batch_size, _ = decoder_targets.size()
-            mask_len = mask_len.int().to(device)
-            mask = torch.ones(batch_size, decoder_seq_len, device=device)
-            mask = create_mask(mask_len, mask)
-
             # turn off teacher forcing
             model_outputs = model(cid3, encoder_inputs, decoder_inputs, mean_std, teacher_forcing_ratio=0)
-            loss, cnt = loss_func(model_outputs.view(-1), decoder_targets.contiguous().view(-1), mask.view(-1))
+            loss, cnt = loss_func(model_outputs.view(-1), decoder_targets.contiguous().view(-1))
             epoch_loss += loss.item() * cnt
             total_num += cnt
 
     return epoch_loss / total_num
 
 
-def create_mask(mask_len, mask):
-    for i, mask_len_i in enumerate(mask_len):
-        if mask_len_i == 0:
-            continue
-        mask[i, -mask_len_i:] = 0
-    return mask
-
-
-def mse_loss(outputs, targets, mask, reduction='elementwise_mean'):
-    outputs, targets = outputs * mask, targets * mask
+def mse_loss(outputs, targets, reduction='elementwise_mean'):
     mse = nn.MSELoss(reduction=reduction)
     return mse(outputs, targets), outputs.numel()
 
@@ -131,7 +114,7 @@ if __name__ == '__main__':
     LINEAR_DROPOUT = 0.6
     TEACHER_FORCING_RATIO = 0.2
     CLIP = 15
-    LEARNING_RATE = 0.001
+    LEARNING_RATE = 0.002
     MOMENTUM = 0.9
     EPOCH_NUM = 100
     PATIENCE = 10
@@ -140,6 +123,7 @@ if __name__ == '__main__':
     set_seed()
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    # device = torch.device('cpu')
 
     train_set = TimeSeriesDataSet(DATA_PATH, mode='train')
     test_set = TimeSeriesDataSet(DATA_PATH, mode='test')
@@ -149,9 +133,10 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, sampler=train_sampler, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=BATCH_SIZE_TEST, sampler=test_sampler, num_workers=0)
 
-    encoder = EncoderCho(EMBEDDING_SIZE_CID3, ENCODER_INPUTS_SIZE, ENCODER_HIDDEN_SIZE, LAYER_NUM, DROPOUT, DECODER_HIDDEN_SIZE)
-    decoder = DecoderCho(EMBEDDING_SIZE_CID3, DECODER_INPUTS_SIZE, DECODER_HIDDEN_SIZE, LINNEAR_HIDDEN_SIZE, LINEAR_DROPOUT)
-    seq2seq = Seq2SeqNaive(encoder, decoder, CID3_SIZE, EMBEDDING_SIZE_CID3, DROPOUT, device).to(device)
+    encoder = EncoderCho(EMBEDDING_SIZE_CID3, ENCODER_INPUTS_SIZE, ENCODER_HIDDEN_SIZE, DECODER_HIDDEN_SIZE)
+    attention = Attention(ENCODER_HIDDEN_SIZE, DECODER_HIDDEN_SIZE)
+    decoder = DecoderCho(EMBEDDING_SIZE_CID3, DECODER_INPUTS_SIZE, DECODER_HIDDEN_SIZE, ENCODER_HIDDEN_SIZE, attention)
+    seq2seq = Seq2SeqAttention(encoder, decoder, CID3_SIZE, EMBEDDING_SIZE_CID3, DROPOUT, device).to(device)
 
     seq2seq.apply(init_weights)
 
@@ -192,7 +177,7 @@ if __name__ == '__main__':
         else:
             not_descending_cnt = 0
             min_val_loss = val_loss
-            torch.save(seq2seq.state_dict(), '../model/seq2seq_naive_model.pt')
+            torch.save(seq2seq.state_dict(), '../model/seq2seq_attention_model.pt')
             # save_embedding('cid3')
             print()
             print('model saved with validation loss', val_loss)

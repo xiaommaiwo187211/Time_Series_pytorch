@@ -4,8 +4,8 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, RandomSampler
 
-from data_loader import TimeSeriesDataSet
-from wavenet_model import WaveNet
+from seq2seq_wavenet.dataloader import TimeSeriesDataSet
+from seq2seq_wavenet.wavenet_model import WaveNet
 
 import numpy as np
 from time import time
@@ -18,7 +18,7 @@ def train_epoch(model, data_loader, optimizer, loss_func, device):
     model.train()
 
     epoch_loss, total_num = 0, 0
-    for i, (_, encoder_inputs, decoder_inputs, decoder_targets, _, _, mean_std, sku_brand_cid3) in enumerate(data_loader):
+    for i, (_, encoder_inputs, decoder_inputs, decoder_targets, _, mean_std, sku_brand_cid3) in enumerate(data_loader):
         # encoder_inputs: (batch, feature, encoder_sequence)
         # decoder_inputs: (batch, feature, decoder_sequence)
         # decoder_targets: (batch, 1, decoder_sequence)
@@ -32,11 +32,8 @@ def train_epoch(model, data_loader, optimizer, loss_func, device):
         mean_std = mean_std.float().to(device).unsqueeze(2)
         cid3 = sku_brand_cid3[:, -1].long().to(device)
 
-        batch_size, _, decoder_seq_len = decoder_inputs.size()
-        mask = torch.ones(batch_size, decoder_seq_len, device=device)
-
         model_outputs = model(cid3, encoder_inputs, decoder_inputs, mean_std, teacher_forcing_ratio=1)
-        loss, cnt = loss_func(model_outputs.contiguous().view(-1), decoder_targets.view(-1), mask.view(-1))
+        loss, cnt = loss_func(model_outputs.contiguous().view(-1), decoder_targets.view(-1))
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item() * cnt
@@ -50,42 +47,27 @@ def evaluate_epoch(model, data_loader, loss_func, device):
 
     epoch_loss, total_num = 0, 0
     with torch.no_grad():
-        for i, (_, encoder_inputs, decoder_inputs, decoder_targets, mask_len, _, mean_std, sku_brand_cid3) in enumerate(data_loader):
+        for i, (_, encoder_inputs, decoder_inputs, decoder_targets, _, mean_std, sku_brand_cid3) in enumerate(data_loader):
             encoder_inputs = encoder_inputs.float().to(device).permute(0, 2, 1)
             decoder_inputs = decoder_inputs.float().to(device).permute(0, 2, 1)
             decoder_targets = decoder_targets.float().to(device).permute(0, 2, 1)
             mean_std = mean_std.float().to(device).unsqueeze(2)
             cid3 = sku_brand_cid3[:, -1].long().to(device)
 
-            # construct mask
-            batch_size, _, decoder_seq_len = decoder_inputs.size()
-            mask = torch.ones(batch_size, decoder_seq_len, device=device)
-            mask = construct_mask(mask_len, mask)
-
             model_outputs = model(cid3, encoder_inputs, decoder_inputs, mean_std, teacher_forcing_ratio=0)
-            loss, cnt = loss_func(model_outputs.view(-1), decoder_targets.view(-1), mask.view(-1))
+            loss, cnt = loss_func(model_outputs.view(-1), decoder_targets.view(-1))
             epoch_loss += loss.item() * cnt
             total_num += cnt
 
     return epoch_loss / total_num
 
 
-def construct_mask(mask_len, mask):
-    for i, mask_len_i in enumerate(mask_len):
-        if mask_len_i == 0:
-            continue
-        mask[i, -mask_len_i:] = 0
-    return mask
-
-
-def mae_loss(outputs, targets, mask, reduction='elementwise_mean'):
-    outputs, targets = outputs * mask, targets * mask
+def mae_loss(outputs, targets, reduction='elementwise_mean'):
     mae = nn.L1Loss(reduction=reduction)
     return mae(outputs, targets), outputs.numel()
 
 
-def mse_loss(outputs, targets, mask, reduction='elementwise_mean'):
-    outputs, targets = outputs * mask, targets * mask
+def mse_loss(outputs, targets, reduction='elementwise_mean'):
     mse = nn.MSELoss(reduction=reduction)
     return mse(outputs, targets), outputs.numel()
 
@@ -182,7 +164,7 @@ if __name__ == '__main__':
 
         if val_loss >= min_val_loss:
             not_descending_cnt += 1
-            if not_descending_cnt >= 30 and epoch >= 19 and epoch != EPOCH_NUM - 1:
+            if not_descending_cnt >= 30 and epoch != EPOCH_NUM - 1:
                 print('\nEarly Stopped ...')
                 break
             if epoch >= PATIENCE and val_loss >= max(loss_list):
@@ -193,7 +175,7 @@ if __name__ == '__main__':
         else:
             not_descending_cnt = 0
             min_val_loss = val_loss
-            torch.save(seq2seq.state_dict(), 'model/wavenet_model.pt')
+            torch.save(seq2seq.state_dict(), '../model/seq2seq_wavenet_model.pt')
             # save_embedding('cid3')
             print()
             print('model saved with validation loss', val_loss)

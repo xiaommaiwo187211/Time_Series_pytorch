@@ -12,7 +12,6 @@ class TimeSeriesDataSet(Dataset):
         self.decoder_targets = np.load(data_path + mode + '_decoder_targets.npy')
         self.start_points = np.load(data_path + mode + '_start_points.npy')
         self.mean_std = np.load(data_path + mode + '_mean_std.npy')
-        self.mask_len = np.load(data_path + mode + '_mask_len.npy')
 
         sku_brand_cid3 = np.load(data_path + mode + '_sku_brand_cid3.npy')
         sku, self.sku_arr = self._convert_to_index(sku_brand_cid3[:, 0])
@@ -31,9 +30,9 @@ class TimeSeriesDataSet(Dataset):
         return len(self.encoder_inputs)
 
     def __getitem__(self, item):
-        # item, encoder_inputs, decoder_inputs, decoder_targets, start_points, mean_std, sku_brand_cid3, mask_len
-        return item, self.encoder_inputs[item], self.decoder_inputs[item], self.decoder_targets[item], self.start_points[item], self.mean_std[
-            item], self.sku_brand_cid3[item], self.mask_len[item]
+        # item, encoder_inputs, decoder_inputs, decoder_targets, start_points, mean_std, sku_brand_cid3
+        return item, self.encoder_inputs[item], self.decoder_inputs[item], self.decoder_targets[item], \
+               self.start_points[item], self.mean_std[item], self.sku_brand_cid3[item]
 
 
 # # modified from torch.utils.data.WeightedRandomSampler

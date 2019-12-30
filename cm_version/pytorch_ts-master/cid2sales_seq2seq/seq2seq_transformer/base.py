@@ -4,6 +4,7 @@ from scipy.stats import zscore
 from tqdm import trange
 
 
+
 # Feature flow for all skus
 class Feature_Flow:
 
@@ -90,19 +91,18 @@ class Feature_Flow:
         date_df = self.create_holiday_features(date_df)
         df_train_sales = self.create_sales_median()
         df_total = self.df_total.merge(date_df, on='date') \
-            .merge(df_train_sales, on='item_sku_id')
+                                .merge(df_train_sales, on='item_sku_id')
         return df_total.sort_values(['item_sku_id', 'date']).reset_index(drop=True)
 
 
 # Feature flow for one sku
 class Feature_Flow_SKU:
 
-    def __init__(self, df, date_df, time_frame, padding_size, lag_periods, global_redprice_std, normalize=True, log_transform=True):
+    def __init__(self, df, date_df, time_frame, padding_size, global_redprice_std, normalize=True, log_transform=True):
         self.df = df.sort_values('date').reset_index(drop=True)
         self.date_df = date_df
         self.time_frame = time_frame
         self.padding_size = padding_size
-        self.lag_periods = lag_periods
         self.normalize = normalize
         self.log_transform = log_transform
         self.global_redprice_std = global_redprice_std
@@ -137,7 +137,6 @@ class Feature_Flow_SKU:
     def generate_features(self):
         train_start = self.time_frame[0]
         # train start date should be `lag` days after `train_start`
-        min_lag_dt = str(pd.to_datetime(train_start) + pd.Timedelta(days=max(self.lag_periods) + 1))[:10]
         max_dt_df = self.df.date.max()
         distance_arr = np.log1p(np.arange(len(pd.date_range(self.min_dt_df, max_dt_df))))
         if self.normalize:
@@ -146,15 +145,14 @@ class Feature_Flow_SKU:
         self.df['distance_log'] = distance_arr
         self.df['instant_discount'] = self.df.instant_price / self.df.redprice
         self.df['nominal_discount'] = self.df.nominal_netprice / self.df.redprice
-        for t in self.lag_periods:
-            self.df['sale_qtty_lag' + str(t)] = self.df.sale_qtty.rolling(t).mean().shift(1).fillna(
-                method='ffill').fillna(0)
+        self.df['sale_qtty_lag1'] = self.df.sale_qtty.shift(1).fillna(method='ffill').fillna(0)
         self.df['redprice_lag7'] = self.df.redprice.shift(7).fillna(method='ffill').fillna(method='bfill')
         self.df['redprice_diff_percent'] = (self.df.redprice - self.df.redprice.rolling(7).median().shift(
             1)) / self.df.redprice
         self.df['redprice_diff_percent'] = self.df.redprice_diff_percent.fillna(0)
         self.df.drop(['instant_price', 'nominal_netprice', 'netprice'], axis=1, inplace=True)
-        self.df = self.df[self.df.date >= min_lag_dt]
+        # sale_qtty_lag1 must be the first column
+        self.df = self.df[['sale_qtty_lag1'] + [col for col in self.df.columns if col != 'sale_qtty_lag1']]
 
     def create_train_test(self):
         if self.padding_size > 0:
@@ -167,7 +165,7 @@ class Feature_Flow_SKU:
         train_start, train_end, test_start, test_end = self.time_frame
         train_data = self.df[self.df.date.between(train_start, train_end)]
         test_data = self.df[self.df.date.between(test_start, test_end)]
-        cols_to_remove = ['item_sku_id', 'brand_code', 'cid3', 'date', 'target']
+        cols_to_remove = ['item_sku_id', 'brand_code', 'cid3', 'date', 'target', 'sale_qtty']
         Xtrain, ytrain = train_data.drop(cols_to_remove, axis=1), train_data.target.values.reshape(
             (-1, 1))
         Xtest, ytest = test_data.drop(cols_to_remove, axis=1), test_data.target.values.reshape(
@@ -175,13 +173,12 @@ class Feature_Flow_SKU:
 
         mean_, std_ = 0, 1
         if self.normalize:
-            mean_ = Xtrain.iloc[:, 0].mean()
-            std_ = Xtrain.iloc[:, 0].std()
-            std_ = std_ if std_ > 1e-2 else 1
-            Xtrain.iloc[:, 0] = (Xtrain.iloc[:, 0] - mean_) / std_
-            Xtest.iloc[:, 0] = (Xtest.iloc[:, 0] - mean_) / std_
-            cols = ['sale_qtty', 'instant_discount', 'redprice', 'redprice_diff_percent', 'redprice_lag7', 'nominal_discount'] + \
-                   ['sale_qtty_lag' + str(t) for t in self.lag_periods]
+            # mean_ = Xtrain.iloc[:, 0].mean()
+            # std_ = Xtrain.iloc[:, 0].std()
+            # std_ = std_ if std_ > 1e-2 else 1
+            # Xtrain.iloc[:, 0] = (Xtrain.iloc[:, 0] - mean_) / std_
+            # Xtest.iloc[:, 0] = (Xtest.iloc[:, 0] - mean_) / std_
+            cols = ['instant_discount', 'redprice', 'redprice_diff_percent', 'redprice_lag7', 'nominal_discount']
             for col in cols:
                 temp_mean = Xtrain[col].mean()
                 temp_std = Xtrain[col].std()
@@ -199,46 +196,29 @@ class Feature_Flow_SKU:
 
         return Xtrain.values, ytrain, Xtest.values, ytest, list(Xtrain.columns), mean_, std_
 
-    def create_ts_samples(self, X, y, feature_cols, encoder_seq_len, decoder_seq_len, skip_period, mode='train'):
-
-        def mask_zero(arr, mode):
-            length = decoder_seq_len - arr.shape[1]
-            if mode == 'train' or len(arr) == 0 or length == 0:
-                return arr, 0
-            mask = np.zeros((arr.shape[0], length, arr.shape[2]))
-            arr_ = np.concatenate([arr, mask], axis=1)
-            return arr_, length
+    def create_ts_samples(self, X, y, decoder_seq_len, skip_period, mode='train'):
 
         # number of start points considering skip period
         if mode == 'train':
-            # series [1, 0, 3, 2, 4, 7, 2, 4, 3, 5, 6, 8, 4] with encoder_seq_len=3 and output_seq_len=2 and skip_period=4
+            # series [1, 0, 3, 2, 4, 7, 2, 4, 3, 5, 6, 8, 4] with decoder_seq_len=5 and skip_period=4
             # will have 3 start points [1, 0, 3, 2, 4], [4, 7, 2, 4, 3], [3, 5, 6, 8, 4]
             start_points = list(
-                range((len(X) - encoder_seq_len - decoder_seq_len + skip_period) // skip_period))
+                range((len(X) - decoder_seq_len + skip_period) // skip_period))
         else:
             # test set only has one sequence for each sku
             start_points = [0]
-        encoder_points = [list(range(start_point * skip_period,
-                                     start_point * skip_period + encoder_seq_len))
-                          for start_point in start_points]
-        decoder_points = [list(range(start_point * skip_period + encoder_seq_len,
-                                     min(start_point * skip_period + encoder_seq_len + decoder_seq_len,
-                                         len(X))))
-                          for start_point in start_points]
 
-        # columns to drop from decoder
-        lag_cols = ['sale_qtty_lag' + str(t) for t in self.lag_periods]
-        index_to_keep = [i for i in range(len(feature_cols)) if feature_cols[i] not in lag_cols]
-        X_ = X[:, index_to_keep]
+        decoder_points = [list(range(start_point * skip_period,
+                                     min(start_point * skip_period + decoder_seq_len, len(X))))
+                         for start_point in start_points]
 
-        # encoder_total: (sample, sequence, feature)
+        # decoder_total: (sample, sequence, feature)
         # targets_total: (sample, sequence)
-        encoder_total = np.take(X, encoder_points, axis=0)
         # TODO: for test set, mask decoder sequence and target sequence
-        decoder_total, mask_len = mask_zero(np.take(X_, decoder_points, axis=0), mode)
-        targets_total, mask_len = mask_zero(np.take(y, decoder_points, axis=0), mode)
+        decoder_total = np.take(X, decoder_points, axis=0)
+        targets_total = np.take(y, decoder_points, axis=0)
         start_points = [start_point * skip_period for start_point in start_points]
-        return encoder_total, decoder_total, targets_total, start_points, mask_len
+        return decoder_total, targets_total, start_points
 
 
 def main(data_dir, seed):
@@ -251,49 +231,44 @@ def main(data_dir, seed):
     item_sku_id_list = rnd.permutation(sorted(set(features_df.item_sku_id)))
 
     def main_sub(features_df_sub, mode):
-        # SKU date range must be larger than (ENCODER_SEQ_LEN - PADDING_SIZE)
-        if features_df_sub.shape[0] <= ENCODER_SEQ_LEN - PADDING_SIZE:
-            return [], [], [], [], None, None, 0
-        feature_flow_sku = Feature_Flow_SKU(features_df_sub, date_df, TIME_FRAME, PADDING_SIZE, LAG_PERIODS, global_redprice_std,
+        # SKU date range must be larger than (DECODER_SEQ_LEN - PADDING_SIZE)
+        if features_df_sub.shape[0] <= DECODER_SEQ_LEN - PADDING_SIZE:
+            return [], [], [], None, None
+        feature_flow_sku = Feature_Flow_SKU(features_df_sub, date_df, TIME_FRAME, PADDING_SIZE, global_redprice_std,
                                             NORMALIZE, LOG_TRANSFORM)
         Xtrain, ytrain, Xtest, ytest, feature_cols, mean_, std_ = feature_flow_sku.create_train_test()
         X, y = eval('X' + mode), eval('y' + mode)
-        encoder_total, decoder_total, targets_total, start_points, mask_len = \
-            feature_flow_sku.create_ts_samples(X, y, feature_cols, ENCODER_SEQ_LEN, DECODER_SEQ_LEN, SKIP_PERIOD, mode)
-        return encoder_total, decoder_total, targets_total, start_points, mean_, std_, mask_len
+        decoder_total, targets_total, start_points = \
+            feature_flow_sku.create_ts_samples(X, y, DECODER_SEQ_LEN, SKIP_PERIOD, mode)
+        return decoder_total, targets_total, start_points, mean_, std_
 
     for mode in ['train', 'test']:
-        encoder_arr, decoder_arr, targets_arr, start_points_arr, mean_std_arr, sku_brand_cid3_arr, mask_len_arr = [], [], [], [], [], [], []
+        decoder_arr, targets_arr, start_points_arr, mean_std_arr, sku_brand_cid3_arr = [], [], [], [], []
         for i in trange(len(item_sku_id_list)):
             item_sku_id = item_sku_id_list[i]
             features_df_sub = features_df[features_df.item_sku_id == item_sku_id]
             brand_code, cid3 = features_df_sub.brand_code.min(), features_df_sub.cid3.min()
-            encoder_total, decoder_total, targets_total, start_points, mean_, std_, mask_len = main_sub(features_df_sub, mode)
+            decoder_total, targets_total, start_points, mean_, std_ = main_sub(features_df_sub, mode)
             if len(start_points) == 0:
                 continue
             # TODO: for test set, mask decoder sequence and target sequence
             if mode == 'test' and decoder_total.shape[1] < DECODER_SEQ_LEN:
                 continue
-            encoder_arr.append(encoder_total)
             decoder_arr.append(decoder_total)
             targets_arr.append(targets_total)
             start_points_arr.append(start_points)
             mean_std_arr.append(np.array([mean_, std_] * len(start_points)).reshape((-1, 2)))
             sku_brand_cid3_arr.append(np.array([item_sku_id, brand_code, cid3] * len(start_points)).reshape((-1, 3)))
-            mask_len_arr.append(np.array([mask_len] * len(start_points)).reshape((-1, 1)))
 
-        encoder_arr, decoder_arr = np.concatenate(encoder_arr), np.concatenate(decoder_arr)
+        decoder_arr = np.concatenate(decoder_arr)
         targets_arr, start_points_arr = np.concatenate(targets_arr), np.concatenate(start_points_arr)
         mean_std_arr, sku_brand_cid3_arr = np.concatenate(mean_std_arr), np.concatenate(sku_brand_cid3_arr)
-        mask_len_arr = np.concatenate(mask_len_arr)
 
-        np.save(DATA_DIR + mode + '_encoder_inputs.npy', encoder_arr)
         np.save(DATA_DIR + mode + '_decoder_inputs.npy', decoder_arr)
         np.save(DATA_DIR + mode + '_decoder_targets.npy', targets_arr)
         np.save(DATA_DIR + mode + '_start_points.npy', start_points_arr)
         np.save(DATA_DIR + mode + '_mean_std.npy', mean_std_arr)
         np.save(DATA_DIR + mode + '_sku_brand_cid3.npy', sku_brand_cid3_arr)
-        np.save(DATA_DIR + mode + '_mask_len.npy', mask_len_arr)
 
         # # in order for sku embedding, test data must not contain sku which isn't in train data
         # if mode == 'train':
@@ -301,19 +276,18 @@ def main(data_dir, seed):
 
 
 
+
 if __name__ == '__main__':
     DATA_DIR = '../data/'
-    # encoder length is 3 months and decoder length is 2 months
+    # decoder sequence length is 5 month
     TRAIN_START = '2018-01-01'
     TRAIN_END = '2019-09-28'
     TEST_START = '2019-06-28'
     TEST_END = '2019-11-29'
     TIME_FRAME = [TRAIN_START, TRAIN_END, TEST_START, TEST_END]
-    ENCODER_SEQ_LEN = 93
-    DECODER_SEQ_LEN = 62
+    DECODER_SEQ_LEN = 155
     PADDING_SIZE = 0
     SKIP_PERIOD = 21
-    LAG_PERIODS = [7, 14, 31, 62]
     SEED = 1
     NORMALIZE = True
     LOG_TRANSFORM = True
